@@ -37,7 +37,7 @@ def find_tracks_from_search(query_or_url, limit=40):
         title = panel.get("data-js-song-title")
         artist = panel.get("data-js-artist-name")
         if mp3:
-            tracks.append({"url": mp3, "title": title, "artist": artist})
+            tracks.append({"url": mp3, "title": title or "Unknown Title", "artist": artist or "Unknown Artist"})
     return tracks
 
 def find_all_artists_by_name(name):
@@ -49,7 +49,7 @@ def find_all_artists_by_name(name):
         href = urljoin(BASE, a["href"])
         title = a.get_text(strip=True)
         if href not in [ar['url'] for ar in artists]:
-            artists.append({"name": title, "url": href})
+            artists.append({"name": title or "Unknown", "url": href})
     return artists
 
 def collect_tracks_from_artist(artist_url):
@@ -63,7 +63,7 @@ def collect_tracks_from_artist(artist_url):
             title = p.get("data-js-song-title")
             artist = p.get("data-js-artist-name")
             if mp3:
-                all_tracks.append({"url": mp3, "title": title, "artist": artist})
+                all_tracks.append({"url": mp3, "title": title or "Unknown Title", "artist": artist or "Unknown Artist"})
         next_link = soup.select_one(".paginate a.next_page")
         if next_link and next_link.get("href"):
             page_url = urljoin(BASE, next_link["href"])
@@ -71,8 +71,9 @@ def collect_tracks_from_artist(artist_url):
             break
     return all_tracks
 
-def download_file(url, path, progress_callback=None):
-    with requests.get(url, headers=HEADERS, stream=True) as r:
+def download_file(url, path, progress_callback=None, session=None):
+    sess = session or requests
+    with sess.get(url, headers=HEADERS, stream=True, timeout=30) as r:
         r.raise_for_status()
         total = int(r.headers.get('content-length', 0))
         with open(path, "wb") as f:
@@ -84,94 +85,174 @@ def download_file(url, path, progress_callback=None):
                     if progress_callback and total > 0:
                         progress_callback(downloaded / total)
 
-# ===================== GUI Приложение =====================
+# ===================== UI / Приложение =====================
 
 class MP3DownloaderApp:
     def __init__(self, root):
         self.root = root
         self.root.title("MP3Party Downloader")
-        self.root.geometry("750x500")
+        self.root.geometry("820x560")
+        self.root.minsize(700, 480)
 
+        # Состояние
         self.mode_var = tk.StringVar(value="search")
         self.query_var = tk.StringVar()
         self.folder_var = tk.StringVar()
+        self.limit_var = tk.IntVar(value=20)
 
-        self.tracks = []
-        self.check_vars = []
+        self.tracks = []          # list of track dicts
+        self.check_vars = []      # list of BooleanVar
 
+        self._build_style()
         self.create_widgets()
 
+    def _build_style(self):
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("Header.TLabel", font=("Segoe UI", 14, "bold"))
+        style.configure("TFrame", padding=6)
+        style.configure("Card.TLabelframe", background="#f7f7f7")
+        style.configure("Card.TLabelframe.Label", font=("Segoe UI", 11, "bold"))
+        style.map("Danger.TButton", foreground=[('active', 'white')], background=[('active', '#c0392b')])
+
     def create_widgets(self):
-        # Режим
-        frame_mode = ttk.LabelFrame(self.root, text="Режим")
-        frame_mode.pack(fill="x", padx=10, pady=5)
-        ttk.Radiobutton(frame_mode, text="Поиск песен", variable=self.mode_var, value="search").pack(side="left", padx=5)
-        ttk.Radiobutton(frame_mode, text="Все песни артиста", variable=self.mode_var, value="artist").pack(side="left", padx=5)
+        # Header
+        header = ttk.Frame(self.root)
+        header.pack(fill="x", padx=10, pady=(10, 0))
+        ttk.Label(header, text="MP3Party Downloader", style="Header.TLabel").pack(side="left")
+        ttk.Label(header, text="— удобная загрузка треков с mp3party.net", anchor="e").pack(side="right")
 
-        # Запрос
-        frame_query = ttk.Frame(self.root)
-        frame_query.pack(fill="x", padx=10, pady=5)
-        ttk.Label(frame_query, text="Запрос / URL:").pack(side="left")
-        ttk.Entry(frame_query, textvariable=self.query_var, width=50).pack(side="left", padx=5)
-        ttk.Button(frame_query, text="Найти", command=self.search_tracks).pack(side="left", padx=5)
+        main = ttk.Frame(self.root)
+        main.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Папка
-        frame_folder = ttk.Frame(self.root)
-        frame_folder.pack(fill="x", padx=10, pady=5)
-        ttk.Label(frame_folder, text="Папка:").pack(side="left")
-        ttk.Entry(frame_folder, textvariable=self.folder_var, width=50).pack(side="left", padx=5)
-        ttk.Button(frame_folder, text="Выбрать", command=self.choose_folder).pack(side="left", padx=5)
+        # Left: controls
+        left = ttk.Frame(main)
+        left.pack(side="left", fill="y", padx=(0,10))
 
-        # Таблица треков
-        self.frame_tracks = ttk.Frame(self.root)
-        self.frame_tracks.pack(fill="both", expand=True, padx=10, pady=5)
+        # Mode card
+        mode_card = ttk.Labelframe(left, text="Режим", padding=(10,8), style="Card.TLabelframe")
+        mode_card.pack(fill="x", pady=4)
+        ttk.Radiobutton(mode_card, text="Поиск песен", variable=self.mode_var, value="search").grid(row=0, column=0, sticky="w", padx=2, pady=2)
+        ttk.Radiobutton(mode_card, text="Все песни артиста", variable=self.mode_var, value="artist").grid(row=0, column=1, sticky="w", padx=2, pady=2)
 
-        self.canvas = tk.Canvas(self.frame_tracks)
-        self.scrollbar = ttk.Scrollbar(self.frame_tracks, orient="vertical", command=self.canvas.yview)
+        # Query card
+        query_card = ttk.Labelframe(left, text="Запрос / URL", padding=(10,8), style="Card.TLabelframe")
+        query_card.pack(fill="x", pady=6)
+        q_entry = ttk.Entry(query_card, textvariable=self.query_var, width=36)
+        q_entry.grid(row=0, column=0, columnspan=2, sticky="w", pady=4)
+        search_btn = ttk.Button(query_card, text="Найти", command=self.search_tracks)
+        search_btn.grid(row=0, column=2, padx=6)
+
+        # Limit selector
+        ttk.Label(query_card, text="Макс результатов:").grid(row=1, column=0, sticky="w", pady=(6,0))
+        limit_spin = ttk.Spinbox(query_card, from_=1, to=40, textvariable=self.limit_var, width=6)
+        limit_spin.grid(row=1, column=1, sticky="w", pady=(6,0))
+
+        # Folder card
+        folder_card = ttk.Labelframe(left, text="Папка для сохранения", padding=(10,8), style="Card.TLabelframe")
+        folder_card.pack(fill="x", pady=6)
+        f_entry = ttk.Entry(folder_card, textvariable=self.folder_var, width=36)
+        f_entry.grid(row=0, column=0, pady=4)
+        ttk.Button(folder_card, text="Выбрать...", command=self.choose_folder).grid(row=0, column=1, padx=6)
+
+        # Action buttons
+        actions = ttk.Frame(left)
+        actions.pack(fill="x", pady=6)
+        self.btn_select_all = ttk.Button(actions, text="Выбрать всё", command=self.select_all)
+        self.btn_select_all.pack(side="left", expand=True, fill="x", padx=(0,4))
+        self.btn_select_none = ttk.Button(actions, text="Снять всё", command=self.select_none)
+        self.btn_select_none.pack(side="left", expand=True, fill="x", padx=(4,0))
+
+        # Download button & status
+        dl_card = ttk.Frame(left)
+        dl_card.pack(fill="x", pady=(10,0))
+        self.progress = ttk.Progressbar(dl_card, orient="horizontal", length=240, mode="determinate")
+        self.progress.pack(pady=(0,6))
+        self.lbl_status = ttk.Label(dl_card, text="Готов", anchor="center")
+        self.lbl_status.pack(fill="x", pady=(0,6))
+
+        self.btn_download = ttk.Button(dl_card, text="Скачать выбранные", command=self.start_download)
+        self.btn_download.pack(fill="x")
+
+        # Right: track list
+        right = ttk.Frame(main)
+        right.pack(side="left", fill="both", expand=True)
+
+        tracks_card = ttk.Labelframe(right, text="Список треков", padding=(8,8), style="Card.TLabelframe")
+        tracks_card.pack(fill="both", expand=True)
+
+        # Scrollable area for checkboxes
+        self.canvas = tk.Canvas(tracks_card, borderwidth=0)
+        self.scrollbar = ttk.Scrollbar(tracks_card, orient="vertical", command=self.canvas.yview)
         self.scroll_frame = ttk.Frame(self.canvas)
 
-        self.scroll_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-
-        self.canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        self.scroll_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.create_window((0,0), window=self.scroll_frame, anchor="nw")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
 
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
 
-        # Кнопка скачивания
-        self.progress = ttk.Progressbar(self.root, orient="horizontal", length=400, mode="determinate")
-        self.progress.pack(pady=5)
-        ttk.Button(self.root, text="Скачать", command=self.start_download).pack(pady=5)
+        # Footer: counts & credits
+        footer = ttk.Frame(self.root)
+        footer.pack(fill="x", padx=10, pady=(0,10))
+        self.lbl_count = ttk.Label(footer, text="Треков: 0")
+        self.lbl_count.pack(side="left")
+        ttk.Label(footer, text=" | ").pack(side="left")
+        ttk.Label(footer, text="Скрипт для личного использования.").pack(side="left")
+        ttk.Label(footer, text=" ").pack(side="right")
 
+    # ----------------- утилиты UI -----------------
     def choose_folder(self):
         folder = filedialog.askdirectory()
         if folder:
             self.folder_var.set(folder)
 
+    def select_all(self):
+        for v in self.check_vars:
+            v.set(True)
+
+    def select_none(self):
+        for v in self.check_vars:
+            v.set(False)
+
+    def _set_status(self, text):
+        self.lbl_status.config(text=text)
+
+    def _show_error(self, title, text):
+        # call from main thread
+        messagebox.showerror(title, text)
+
+    # ----------------- поиск -----------------
     def search_tracks(self):
         query = self.query_var.get().strip()
         if not query:
             messagebox.showerror("Ошибка", "Введите запрос или ссылку")
             return
 
+        self._set_status("Поиск...")
+        self.progress.configure(value=0)
+        self.clear_tracks()
+
         def worker():
             try:
                 if self.mode_var.get() == "search":
-                    # tracks = find_first_track_from_search(query)
-                    tracks = find_tracks_from_search(query, limit=40)
+                    tracks = find_tracks_from_search(query, limit=self.limit_var.get())
                     self.root.after(0, lambda: self.show_tracks(tracks, default_checked=False))
                 else:
-                    # поиск артиста
+                    # режим "artist"
                     if not query.startswith("http") and not query.isdigit():
                         artists = find_all_artists_by_name(query)
                         if not artists:
-                            messagebox.showerror("Ошибка", "Артист не найден")
+                            self.root.after(0, lambda: self._show_error("Ошибка", "Артист не найден"))
+                            self.root.after(0, lambda: self._set_status("Готов"))
                             return
                         if len(artists) > 1:
                             self.root.after(0, lambda: self.show_artist_selection(artists))
+                            self.root.after(0, lambda: self._set_status("Ожидание выбора артиста"))
                             return
                         else:
                             tracks = collect_tracks_from_artist(artists[0]["url"])
@@ -179,41 +260,88 @@ class MP3DownloaderApp:
                     else:
                         tracks = collect_tracks_from_artist(query)
                         self.root.after(0, lambda: self.show_tracks(tracks))
+                self.root.after(0, lambda: self._set_status("Готов"))
             except Exception as e:
-                messagebox.showerror("Ошибка", str(e))
+                self.root.after(0, lambda: self._show_error("Ошибка", str(e)))
+                self.root.after(0, lambda: self._set_status("Готов"))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def show_artist_selection(self, artists):
         top = tk.Toplevel(self.root)
         top.title("Выберите артиста")
+        top.geometry("480x320")
+        ttk.Label(top, text="Найдено несколько артистов. Выберите один:").pack(anchor="w", padx=10, pady=(8,0))
 
-        lb = tk.Listbox(top, width=50, height=10)
+        lb = tk.Listbox(top, width=60, height=12)
         for art in artists:
             lb.insert(tk.END, art["name"])
-        lb.pack(padx=10, pady=10)
+        lb.pack(padx=10, pady=8, fill="both", expand=True)
 
         def select_artist():
             idx = lb.curselection()
             if idx:
                 url = artists[idx[0]]["url"]
                 top.destroy()
-                threading.Thread(target=lambda: self.show_tracks(collect_tracks_from_artist(url)), daemon=True).start()
+                self._set_status("Сбор треков артиста...")
+                threading.Thread(target=lambda: self._collect_and_show_artist(url), daemon=True).start()
 
-        ttk.Button(top, text="Выбрать", command=select_artist).pack(pady=5)
+        btn = ttk.Button(top, text="Выбрать", command=select_artist)
+        btn.pack(pady=(0,10))
+
+    def _collect_and_show_artist(self, url):
+        try:
+            tracks = collect_tracks_from_artist(url)
+            self.root.after(0, lambda: self.show_tracks(tracks))
+            self.root.after(0, lambda: self._set_status("Готов"))
+        except Exception as e:
+            self.root.after(0, lambda: self._show_error("Ошибка", str(e)))
+            self.root.after(0, lambda: self._set_status("Готов"))
+
+    def clear_tracks(self):
+        for w in self.scroll_frame.winfo_children():
+            w.destroy()
+        self.tracks = []
+        self.check_vars = []
+        self.lbl_count.config(text="Треков: 0")
 
     def show_tracks(self, tracks, default_checked=True):
+        # Очищаем
         for widget in self.scroll_frame.winfo_children():
             widget.destroy()
         self.tracks = tracks
         self.check_vars = []
 
-        for track in tracks:
+        # Заполняем
+        for idx, track in enumerate(tracks):
             var = tk.BooleanVar(value=default_checked)
             self.check_vars.append(var)
-            chk = ttk.Checkbutton(self.scroll_frame, text=f"{track['artist']} - {track['title']}", variable=var)
-            chk.pack(anchor="w")
+            row = ttk.Frame(self.scroll_frame)
+            row.pack(fill="x", anchor="w", pady=1, padx=2)
 
+            chk = ttk.Checkbutton(row, variable=var)
+            chk.pack(side="left", padx=(0,6))
+            # compact label with artist - title and small url hover
+            lbl_text = f"{track.get('artist', '')} — {track.get('title', '')}"
+            lbl = ttk.Label(row, text=lbl_text, anchor="w")
+            lbl.pack(side="left", fill="x", expand=True)
+
+            # save the url as an attribute for convenience
+            lbl.url = track.get("url", "")
+
+            # add a small 'preview' button that opens URL in browser if needed
+            def open_url(u=track.get("url", "")):
+                import webbrowser
+                if u:
+                    webbrowser.open(u)
+            btn_preview = ttk.Button(row, text="Открыть", width=8, command=open_url)
+            btn_preview.pack(side="right", padx=(6,0))
+
+        self.lbl_count.config(text=f"Треков: {len(tracks)}")
+        # reset progress
+        self.progress.configure(value=0)
+
+    # ----------------- скачивание -----------------
     def start_download(self):
         folder = self.folder_var.get()
         if not folder:
@@ -225,21 +353,39 @@ class MP3DownloaderApp:
             messagebox.showinfo("Инфо", "Нет выбранных треков для скачивания")
             return
 
+        # disable UI actions while качаем
+        self._set_status("Скачивание...")
+        self.btn_download.config(state="disabled")
+        self.btn_select_all.config(state="disabled")
+        self.btn_select_none.config(state="disabled")
+
         def worker():
             session = requests.Session()
-            for track in selected_tracks:
+            total_tracks = len(selected_tracks)
+            for i, track in enumerate(selected_tracks, start=1):
                 filename = safe_filename(f"{track['artist']} - {track['title']}.mp3")
                 path = os.path.join(folder, filename)
                 try:
-                    def prog(p):
-                        self.root.after(0, lambda: self.progress.configure(value=p*100))
-                    download_file(track["url"], path, progress_callback=prog)
+                    def prog(p, idx=i, total=total_tracks):
+                        # p - 0..1 for current file; we map to overall progress roughly:
+                        base = (idx - 1) / total
+                        overall = base + (p / total)
+                        self.root.after(0, lambda: self.progress.configure(value=overall * 100))
+                    download_file(track["url"], path, progress_callback=prog, session=session)
                 except Exception as e:
-                    print(f"Ошибка скачивания {track['url']}: {e}")
-                self.root.after(0, lambda: self.progress.configure(value=0))
-            messagebox.showinfo("Готово", "Скачивание завершено!")
+                    print(f"Ошибка скачивания {track.get('url')}: {e}")
+                # after each file reset per-file progress (keeps overall)
+                self.root.after(0, lambda: self.progress.configure(value=(i / total_tracks) * 100))
+            # done
+            self.root.after(0, lambda: messagebox.showinfo("Готово", "Скачивание завершено!"))
+            self.root.after(0, lambda: self._set_status("Готов"))
+            self.root.after(0, lambda: self.progress.configure(value=0))
+            self.root.after(0, lambda: self.btn_download.config(state="normal"))
+            self.root.after(0, lambda: self.btn_select_all.config(state="normal"))
+            self.root.after(0, lambda: self.btn_select_none.config(state="normal"))
 
         threading.Thread(target=worker, daemon=True).start()
+
 
 # ===================== Запуск =====================
 
